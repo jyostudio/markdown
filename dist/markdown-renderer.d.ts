@@ -6,11 +6,13 @@
  */
 import { Node } from "./node";
 import { Renderer } from "./html-renderer";
+import type { MarkdownPlugin } from "./plugin";
 /**
  * 将 CommonMark AST 渲染为 Markdown 字符串。
  */
 export declare class MarkdownRenderer extends Renderer<string> {
     #private;
+    constructor(plugins?: MarkdownPlugin[]);
     /**
      * 遍历 AST 并渲染为 Markdown 字符串。
      */

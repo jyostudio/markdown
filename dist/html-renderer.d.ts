@@ -4,6 +4,7 @@
  * 遍历 AST 并生成 HTML 字符串。
  */
 import { Node, type NodeType } from "./node";
+import type { MarkdownPlugin } from "./plugin";
 /**
  * HtmlRenderer 的配置选项。
  */
@@ -32,6 +33,10 @@ export interface RendererOptions {
      * markdownToHtml(md, { allowedFeatures: ["strong", "emph", "link"] })
      */
     allowedFeatures?: NodeType[] | Set<NodeType>;
+    /**
+     * 插件列表。插件可提供自定义节点类型的 HTML 渲染规则。
+     */
+    plugins?: MarkdownPlugin[];
 }
 /**
  * 抽象基础渲染器。通过继承并实现节点处理器可以创建

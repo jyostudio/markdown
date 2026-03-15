@@ -18,6 +18,9 @@ export type NodeType =
   | "code_block"
   | "html_block"
   | "thematic_break"
+  | "table"
+  | "table_row"
+  | "table_cell"
   | "text"
   | "softbreak"
   | "linebreak"
@@ -28,22 +31,37 @@ export type NodeType =
   | "code"
   | "html_inline";
 
+/**
+ * 表格单元格对齐方式
+ */
+export type TableAlign = "left" | "center" | "right" | null;
+
 
 /**
  * 可包含子节点的容器类型集合
  */
-const CONTAINER_TYPES: Set<NodeType> = new Set([
+const CONTAINER_TYPES: Set<string> = new Set([
   "document",
   "block_quote",
   "list",
   "item",
   "paragraph",
   "heading",
+  "table",
+  "table_row",
+  "table_cell",
   "emph",
   "strong",
   "link",
   "image",
 ]);
+
+/**
+ * 注册自定义容器类型。插件可调用此函数，使其自定义节点类型被识别为容器。
+ */
+export function registerContainerType(type: string): void {
+  CONTAINER_TYPES.add(type);
+}
 
 export const isContainer = overload(
   [String],
@@ -326,6 +344,15 @@ export class Node {
    * HTML 块的类型（1–7）
    */
   htmlBlockType = 0;
+
+  // 表格
+
+  /**
+   * 表格列的对齐方式数组
+   */
+  tableAlignments: TableAlign[] | null = null;
+
+
 
   constructor(
     type: NodeType,

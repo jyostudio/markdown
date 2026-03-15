@@ -14,8 +14,8 @@
  *   - MarkdownRenderer： AST  ──▶  Markdown 字符串
  *   组合使用：HTML → AST → Markdown
  */
-export { Node, NodeWalker, isContainer } from "./node";
-export type { NodeType, ListData, NodeWalkerEvent } from "./node";
+export { Node, NodeWalker, isContainer, registerContainerType } from "./node";
+export type { NodeType, ListData, NodeWalkerEvent, TableAlign } from "./node";
 export { BlockParser as Parser } from "./block-parser";
 export type { RefMap } from "./common";
 export { InlineParser } from "./inline-parser";
@@ -23,15 +23,18 @@ export { HtmlRenderer, Renderer } from "./html-renderer";
 export type { RendererOptions } from "./html-renderer";
 export { HtmlParser } from "./html-parser";
 export { MarkdownRenderer } from "./markdown-renderer";
+export type { MarkdownPlugin, BlockHandler, InlineHandler, HtmlRenderRule, MarkdownRenderRule, HtmlParseRule, } from "./plugin";
+export { collectPluginMap, collectPluginHandlers } from "./plugin";
 import type { Node } from "./node";
 /**
  * 将 Markdown 字符串解析为 AST。
  *
  * ```ts
  * const ast = parse('# Hello\n\nWorld');
+ * const ast2 = parse(md, [mathPlugin]);
  * ```
  */
-export declare const parse: import("@jyostudio/overload").OverloadBuilder<[(args_0: string) => Node]>;
+export declare const parse: import("@jyostudio/overload").OverloadBuilder<[(args_0: string, args_1: any[]) => Node, (args_0: string) => Node]>;
 /**
  * 将 AST 节点树渲染为 HTML 字符串。
  *
@@ -54,17 +57,19 @@ export declare const markdownToHtml: import("@jyostudio/overload").OverloadBuild
  *
  * ```ts
  * const ast = parseHtml('<p><strong>Hello</strong></p>');
+ * const ast2 = parseHtml(html, [mathPlugin]);
  * ```
  */
-export declare const parseHtml: import("@jyostudio/overload").OverloadBuilder<[(args_0: string) => Node]>;
+export declare const parseHtml: import("@jyostudio/overload").OverloadBuilder<[(args_0: string, args_1: any[]) => Node, (args_0: string) => Node]>;
 /**
  * 将 AST 节点树渲染为 Markdown 字符串。
  *
  * ```ts
  * const md = renderMarkdown(ast);
+ * const md2 = renderMarkdown(ast, [mathPlugin]);
  * ```
  */
-export declare const renderMarkdown: import("@jyostudio/overload").OverloadBuilder<[(args_0: any) => string]>;
+export declare const renderMarkdown: import("@jyostudio/overload").OverloadBuilder<[(args_0: any, args_1: any[]) => string, (args_0: any) => string]>;
 /**
  * 将 HTML 字符串直接转换为 Markdown。
  *
@@ -73,5 +78,5 @@ export declare const renderMarkdown: import("@jyostudio/overload").OverloadBuild
  * // → '**bold** text\n\n'
  * ```
  */
-export declare const htmlToMarkdown: import("@jyostudio/overload").OverloadBuilder<[(args_0: string) => string]>;
+export declare const htmlToMarkdown: import("@jyostudio/overload").OverloadBuilder<[(args_0: string, args_1: any[]) => string, (args_0: string) => string]>;
 //# sourceMappingURL=index.d.ts.map

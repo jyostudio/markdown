@@ -5,6 +5,7 @@
  * 原始 HTML、硬/软换行、反斜杠转义、实体、文本。
  */
 import { Node } from "./node";
+import type { InlineHandler } from "./plugin";
 import type { RefMap } from "./common";
 /**
  * 强调/加粗分隔符链表节点，用于两遍式强调匹配算法。
@@ -81,6 +82,7 @@ interface Bracket {
     bracketAfter: boolean;
 }
 export declare class InlineParser {
+    #private;
     /**
      * 当前正在解析的字符串内容
      */
@@ -101,6 +103,7 @@ export declare class InlineParser {
      * 链接引用定义映射表
      */
     refmap: RefMap;
+    constructor(inlineHandlers?: InlineHandler[]);
     /**
      * 解析块节点的 stringContent，将行内元素作为子节点追加，并执行强调后处理。
      */

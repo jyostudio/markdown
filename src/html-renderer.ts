@@ -7,6 +7,8 @@
 import overload from "@jyostudio/overload";
 import { Node, type NodeWalkerEvent, type NodeType } from "./node";
 import { escapeXml, normalizeURI } from "./common";
+import type { MarkdownPlugin, HtmlRenderRule } from "./plugin";
+import { collectPluginMap } from "./plugin";
 
 
 /**
@@ -39,6 +41,11 @@ export interface RendererOptions {
    * markdownToHtml(md, { allowedFeatures: ["strong", "emph", "link"] })
    */
   allowedFeatures?: NodeType[] | Set<NodeType>;
+
+  /**
+   * 插件列表。插件可提供自定义节点类型的 HTML 渲染规则。
+   */
+  plugins?: MarkdownPlugin[];
 }
 
 /**
@@ -72,6 +79,11 @@ export class HtmlRenderer extends Renderer<string> {
    */
   #rawBlockquoteDepth = 0;
 
+  /**
+   * 插件提供的自定义节点 HTML 渲染规则
+   */
+  #pluginRenderers: Map<string, HtmlRenderRule>;
+
   constructor(options?: RendererOptions) {
     super();
     this.#softbreak = options?.softbreak ?? "\n";
@@ -82,6 +94,10 @@ export class HtmlRenderer extends Renderer<string> {
           ? options.allowedFeatures
           : new Set(options.allowedFeatures);
     }
+    this.#pluginRenderers = collectPluginMap(
+      options?.plugins || [],
+      p => p.htmlRenderers,
+    );
   }
 
   /** 检查某个特性是否在白名单中（未设置白名单时永远返回 true）*/
@@ -270,10 +286,10 @@ export class HtmlRenderer extends Renderer<string> {
           if (this.#disableTags === 0) {
             this.#lit(
               "<img" +
-                ' src="' +
-                escapeXml(normalizeURI(node.destination || "")) +
-                '"' +
-                ' alt="',
+              ' src="' +
+              escapeXml(normalizeURI(node.destination || "")) +
+              '"' +
+              ' alt="',
             );
           }
           this.#disableTags++;
@@ -341,10 +357,10 @@ export class HtmlRenderer extends Renderer<string> {
           this.#lit("<pre>");
           this.#out(
             "```" +
-              (cbInfo ? escapeXml(cbInfo) : "") +
-              "\n" +
-              escapeXml(node.literal || "") +
-              "```",
+            (cbInfo ? escapeXml(cbInfo) : "") +
+            "\n" +
+            escapeXml(node.literal || "") +
+            "```",
           );
           this.#lit("</pre>");
           this.#cr();
@@ -410,6 +426,43 @@ export class HtmlRenderer extends Renderer<string> {
           break;
         }
         this.#renderItem(node, entering);
+        break;
+      }
+
+      case "table":
+        this.#cr();
+        this.#tag(entering ? "table" : "/table");
+        this.#cr();
+        break;
+
+      case "table_row":
+        this.#cr();
+        this.#tag(entering ? "tr" : "/tr");
+        this.#cr();
+        break;
+
+      case "table_cell": {
+        if (entering) {
+          const alignments = this.#getTableAlignments(node);
+          const cellIndex = this.#getCellIndex(node);
+          const align = alignments?.[cellIndex] || null;
+          const attrs: [string, string][] | undefined = align
+            ? [["style", "text-align: " + align]]
+            : undefined;
+          this.#tag("td", attrs);
+        } else {
+          this.#tag("/td");
+          this.#cr();
+        }
+        break;
+      }
+
+      default: {
+        // 检查插件自定义渲染规则
+        const rule = this.#pluginRenderers.get(node.type);
+        if (rule) {
+          this.#lit(rule.render(node, entering));
+        }
         break;
       }
     }
@@ -484,6 +537,22 @@ export class HtmlRenderer extends Renderer<string> {
       this.#tag("/li");
       this.#cr();
     }
+  }
+
+  #getTableAlignments(cell: Node): import("./node").TableAlign[] | null {
+    // cell → row → table
+    const table = cell.parent?.parent;
+    return table?.tableAlignments || null;
+  }
+
+  #getCellIndex(cell: Node): number {
+    let index = 0;
+    let cur = cell.prev;
+    while (cur) {
+      index++;
+      cur = cur.prev;
+    }
+    return index;
   }
 
   // #endregion

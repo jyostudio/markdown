@@ -5,7 +5,9 @@
  */
 
 import overload from "@jyostudio/overload";
-import { Node } from "./node";
+import { Node, type TableAlign } from "./node";
+import type { MarkdownPlugin, HtmlParseRule } from "./plugin";
+import { collectPluginMap } from "./plugin";
 
 
 /**
@@ -49,6 +51,18 @@ const BLOCK_PARENTS = new Set(["document", "block_quote", "list", "item"]);
  * 将 HTML 字符串解析为 CommonMark AST（节点树）。
  */
 export class HtmlParser {
+  /**
+   * 插件提供的自定义 HTML→AST 转换规则
+   */
+  #pluginParsers: Map<string, HtmlParseRule>;
+
+  constructor(plugins?: MarkdownPlugin[]) {
+    this.#pluginParsers = collectPluginMap(
+      plugins || [],
+      p => p.htmlParsers,
+    );
+  }
+
   parse(html: string): Node;
   parse(...params: unknown[]): any {
     HtmlParser.prototype.parse = overload([String], function (this: HtmlParser, html) {
@@ -201,7 +215,20 @@ export class HtmlParser {
         }
         break;
       }
+      case "table": {
+        const node = new Node("table");
+        node.tableAlignments = this.#extractTableAlignments(el);
+        parent.appendChild(node);
+        this.#processTableChildren(el, node);
+        break;
+      }
       default: {
+        // 检查插件自定义 HTML→AST 转换规则
+        const rule = this.#pluginParsers.get(tag);
+        if (rule) {
+          rule.parse(el, parent, (e, p) => this.#processChildren(e, p));
+          break;
+        }
         if (BLOCK_ELEMENTS.has(tag)) {
           const node = new Node("html_block");
           node.literal = el.outerHTML + "\n";
@@ -248,5 +275,54 @@ export class HtmlParser {
       }
     }
     return true;
+  }
+
+  #extractTableAlignments(tableEl: Element): TableAlign[] {
+    const alignments: TableAlign[] = [];
+    // 从第一行（thead > tr 或直接 tr）提取列数和对齐方式
+    const firstRow = tableEl.querySelector("tr");
+    if (!firstRow) return alignments;
+    for (const cell of firstRow.children) {
+      const tag = cell.tagName.toLowerCase();
+      if (tag === "th" || tag === "td") {
+        const style = cell.getAttribute("style") || "";
+        const alignMatch = style.match(/text-align:\s*(left|center|right)/);
+        alignments.push(alignMatch ? alignMatch[1] as TableAlign : null);
+      }
+    }
+    return alignments;
+  }
+
+  #processTableChildren(tableEl: Element, tableNode: Node): void {
+    for (const child of tableEl.children) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "thead" || tag === "tbody" || tag === "tfoot") {
+        // 展开 thead/tbody/tfoot，将其中的 tr 直接挂在 table 下
+        this.#processTableRows(child, tableNode);
+      } else if (tag === "tr") {
+        this.#processTableRow(child, tableNode);
+      }
+    }
+  }
+
+  #processTableRows(sectionEl: Element, parent: Node): void {
+    for (const child of sectionEl.children) {
+      if (child.tagName.toLowerCase() === "tr") {
+        this.#processTableRow(child, parent);
+      }
+    }
+  }
+
+  #processTableRow(trEl: Element, parent: Node): void {
+    const row = new Node("table_row");
+    parent.appendChild(row);
+    for (const child of trEl.children) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "th" || tag === "td") {
+        const cell = new Node("table_cell");
+        row.appendChild(cell);
+        this.#processChildren(child, cell);
+      }
+    }
   }
 }

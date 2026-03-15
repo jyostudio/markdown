@@ -15,8 +15,8 @@
  *   组合使用：HTML → AST → Markdown
  */
 
-export { Node, NodeWalker, isContainer } from "./node";
-export type { NodeType, ListData, NodeWalkerEvent } from "./node";
+export { Node, NodeWalker, isContainer, registerContainerType } from "./node";
+export type { NodeType, ListData, NodeWalkerEvent, TableAlign } from "./node";
 
 export { BlockParser as Parser } from "./block-parser";
 export type { RefMap } from "./common";
@@ -30,6 +30,16 @@ export { HtmlParser } from "./html-parser";
 
 export { MarkdownRenderer } from "./markdown-renderer";
 
+export type {
+  MarkdownPlugin,
+  BlockHandler,
+  InlineHandler,
+  HtmlRenderRule,
+  MarkdownRenderRule,
+  HtmlParseRule,
+} from "./plugin";
+export { collectPluginMap, collectPluginHandlers } from "./plugin";
+
 // #region 便捷函数
 
 import overload from "@jyostudio/overload";
@@ -39,18 +49,26 @@ import { HtmlParser } from "./html-parser";
 import { MarkdownRenderer } from "./markdown-renderer";
 import type { Node } from "./node";
 import type { RendererOptions } from "./html-renderer";
+import type { MarkdownPlugin } from "./plugin";
 
 /**
  * 将 Markdown 字符串解析为 AST。
  *
  * ```ts
  * const ast = parse('# Hello\n\nWorld');
+ * const ast2 = parse(md, [mathPlugin]);
  * ```
  */
 export const parse = overload(
   [String],
   function (markdown: string): Node {
     const parser = new BlockParser();
+    return parser.parse(markdown);
+  },
+).add(
+  [String, Array],
+  function (markdown: string, plugins: MarkdownPlugin[]): Node {
+    const parser = new BlockParser(plugins);
     return parser.parse(markdown);
   },
 );
@@ -92,7 +110,8 @@ export const markdownToHtml = overload(
 ).add(
   [String, Object],
   function (markdown: string, options: RendererOptions): string {
-    return (renderHtml as Function)(parse(markdown), options);
+    const plugins = options.plugins || [];
+    return (renderHtml as Function)((parse as Function)(markdown, plugins), options);
   },
 );
 
@@ -101,12 +120,19 @@ export const markdownToHtml = overload(
  *
  * ```ts
  * const ast = parseHtml('<p><strong>Hello</strong></p>');
+ * const ast2 = parseHtml(html, [mathPlugin]);
  * ```
  */
 export const parseHtml = overload(
   [String],
   function (html: string): Node {
     const parser = new HtmlParser();
+    return parser.parse(html);
+  },
+).add(
+  [String, Array],
+  function (html: string, plugins: MarkdownPlugin[]): Node {
+    const parser = new HtmlParser(plugins);
     return parser.parse(html);
   },
 );
@@ -116,12 +142,19 @@ export const parseHtml = overload(
  *
  * ```ts
  * const md = renderMarkdown(ast);
+ * const md2 = renderMarkdown(ast, [mathPlugin]);
  * ```
  */
 export const renderMarkdown = overload(
   [Object],
   function (ast: Node): string {
     const renderer = new MarkdownRenderer();
+    return renderer.render(ast);
+  },
+).add(
+  [Object, Array],
+  function (ast: Node, plugins: MarkdownPlugin[]): string {
+    const renderer = new MarkdownRenderer(plugins);
     return renderer.render(ast);
   },
 );
@@ -138,6 +171,14 @@ export const htmlToMarkdown = overload(
   [String],
   function (html: string): string {
     return (renderMarkdown as Function)(parseHtml(html));
+  },
+).add(
+  [String, Array],
+  function (html: string, plugins: MarkdownPlugin[]): string {
+    return (renderMarkdown as Function)(
+      (parseHtml as Function)(html, plugins),
+      plugins,
+    );
   },
 );
 

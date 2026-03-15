@@ -6,14 +6,28 @@
  */
 
 import overload from "@jyostudio/overload";
-import { Node } from "./node";
+import { Node, type TableAlign } from "./node";
 import { Renderer } from "./html-renderer";
+import type { MarkdownPlugin, MarkdownRenderRule } from "./plugin";
+import { collectPluginMap } from "./plugin";
 
 
 /**
  * 将 CommonMark AST 渲染为 Markdown 字符串。
  */
 export class MarkdownRenderer extends Renderer<string> {
+  /**
+   * 插件提供的自定义节点 Markdown 渲染规则
+   */
+  #pluginRenderers: Map<string, MarkdownRenderRule>;
+
+  constructor(plugins?: MarkdownPlugin[]) {
+    super();
+    this.#pluginRenderers = collectPluginMap(
+      plugins || [],
+      p => p.markdownRenderers,
+    );
+  }
   /**
    * 遍历 AST 并渲染为 Markdown 字符串。
    */
@@ -73,8 +87,19 @@ export class MarkdownRenderer extends Renderer<string> {
         return this.#renderList(node);
       case "item":
         return this.#renderChildren(node);
-      default:
+      case "table":
+        return this.#renderTable(node);
+      case "table_row":
+      case "table_cell":
         return this.#renderChildren(node);
+      default: {
+        // 检查插件自定义渲染规则
+        const rule = this.#pluginRenderers.get(node.type);
+        if (rule) {
+          return rule.render(node, (n: Node) => this.#renderChildren(n));
+        }
+        return this.#renderChildren(node);
+      }
     }
   }
 
@@ -167,6 +192,71 @@ export class MarkdownRenderer extends Renderer<string> {
     if (!result.endsWith("\n\n")) {
       result += "\n";
     }
+    return result;
+  }
+
+  #renderTable(node: Node): string {
+    const alignments = node.tableAlignments || [];
+    const rows: string[][] = [];
+
+    // 收集所有行的单元格内容（table_row 直接是 table 的子节点）
+    let row = node.firstChild;
+    while (row) {
+      if (row.type === "table_row") {
+        const cells: string[] = [];
+        let cell = row.firstChild;
+        while (cell) {
+          if (cell.type === "table_cell") {
+            cells.push(this.#renderChildren(cell).replace(/\|/g, "\\|"));
+          }
+          cell = cell.next;
+        }
+        rows.push(cells);
+      }
+      row = row.next;
+    }
+
+    if (rows.length === 0) return "";
+
+    // 计算每列最小宽度
+    const colCount = alignments.length || (rows[0]?.length ?? 0);
+    const widths: number[] = new Array(colCount).fill(3);
+    for (const row of rows) {
+      for (let i = 0; i < colCount; i++) {
+        widths[i] = Math.max(widths[i], (row[i] || "").length);
+      }
+    }
+
+    // 构建分隔行
+    const delimCells = alignments.map((align, i) => {
+      const w = Math.max(widths[i], 3);
+      const dashes = "-".repeat(w);
+      if (align === "center") return ":" + dashes.slice(2) + ":";
+      if (align === "right") return dashes.slice(1) + ":";
+      if (align === "left") return ":" + dashes.slice(1);
+      return dashes;
+    });
+
+    const formatRow = (cells: string[]) => {
+      const padded = cells.map((c, i) => {
+        const w = widths[i] || 3;
+        return (" " + (c || "").padEnd(w) + " ");
+      });
+      return "|" + padded.join("|") + "|";
+    };
+
+    let result = "";
+    // 第一行
+    if (rows.length > 0) {
+      result += formatRow(rows[0]) + "\n";
+    }
+    // 分隔行
+    result += "|" + delimCells.map((d, i) => " " + d.padEnd(widths[i]) + " ").join("|") + "|\n";
+    // 其余行
+    for (let i = 1; i < rows.length; i++) {
+      result += formatRow(rows[i]) + "\n";
+    }
+    result += "\n";
     return result;
   }
 }

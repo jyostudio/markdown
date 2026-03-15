@@ -4,7 +4,15 @@
 /**
  * CommonMark 所有节点类型的联合类型
  */
-export type NodeType = "document" | "block_quote" | "list" | "item" | "paragraph" | "heading" | "code_block" | "html_block" | "thematic_break" | "text" | "softbreak" | "linebreak" | "emph" | "strong" | "link" | "image" | "code" | "html_inline";
+export type NodeType = "document" | "block_quote" | "list" | "item" | "paragraph" | "heading" | "code_block" | "html_block" | "thematic_break" | "table" | "table_row" | "table_cell" | "text" | "softbreak" | "linebreak" | "emph" | "strong" | "link" | "image" | "code" | "html_inline";
+/**
+ * 表格单元格对齐方式
+ */
+export type TableAlign = "left" | "center" | "right" | null;
+/**
+ * 注册自定义容器类型。插件可调用此函数，使其自定义节点类型被识别为容器。
+ */
+export declare function registerContainerType(type: string): void;
 export declare const isContainer: import("@jyostudio/overload").OverloadBuilder<[(args_0: string) => boolean]>;
 /**
  * 列表节点的附加数据，描述列表的类型与样式。
@@ -164,6 +172,10 @@ export declare class Node {
      * HTML 块的类型（1–7）
      */
     htmlBlockType: number;
+    /**
+     * 表格列的对齐方式数组
+     */
+    tableAlignments: TableAlign[] | null;
     constructor(type: NodeType, sourcepos?: [[number, number], [number, number]]);
     /**
      * 判断当前节点是否为容器类型（可以包含子节点）。

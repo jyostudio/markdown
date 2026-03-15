@@ -5,10 +5,12 @@
  *   第一阶段：构建块结构（本文件）
  *   第二阶段：解析行内内容（inline-parser.ts）
  */
-import { Node, type ListData, type NodeType } from "./node";
+import { Node, type ListData, type NodeType, type TableAlign } from "./node";
+import type { MarkdownPlugin } from "./plugin";
 import { type RefMap } from "./common";
 import { InlineParser } from "./inline-parser";
 export declare class BlockParser {
+    #private;
     /**
      * 文档根节点
      */
@@ -81,7 +83,11 @@ export declare class BlockParser {
      * 行内解析器实例
      */
     inlineParser: InlineParser;
-    constructor();
+    /**
+     * 已注册的插件列表
+     */
+    plugins: MarkdownPlugin[];
+    constructor(plugins?: MarkdownPlugin[]);
     /**
      * 解析 Markdown 字符串，构建并返回 AST 文档根节点。
      */
@@ -148,6 +154,18 @@ export declare class BlockParser {
      * 终结列表节点：根据各列表项末尾是否为空行判断是否为紧凑列表。
      */
     finalizeList(block: Node): void;
+    /**
+     * 解析表格分隔行，提取列对齐方式。
+     */
+    parseTableAlignments(delimLine: string): TableAlign[] | null;
+    /**
+     * 解析表格行文本为单元格内容数组。
+     */
+    parseTableCells(line: string): string[];
+    /**
+     * 终结表格节点：将积累的行内容解析为 table_row / table_cell 子树。
+     */
+    finalizeTable(block: Node): void;
     /**
      * 检查给定块节点（含嵌套列表末端）是否以空行结尾。
      */

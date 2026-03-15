@@ -7,7 +7,9 @@
  */
 
 import overload from "@jyostudio/overload";
-import { Node, type ListData, type NodeType } from "./node";
+import { Node, registerContainerType, type ListData, type NodeType, type TableAlign } from "./node";
+import type { MarkdownPlugin, BlockHandler, InlineHandler } from "./plugin";
+import { collectPluginHandlers } from "./plugin";
 import {
   isSpaceOrTab,
   peek,
@@ -33,6 +35,11 @@ import { InlineParser } from "./inline-parser";
 // #region 附加正则表达式
 
 /**
+ * GFM 表格分隔行正则：匹配 `| --- | :---: | ---: |` 等格式
+ */
+const reTableDelimiterRow = /^\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/;
+
+/**
  * 围栏式代码块关闭行正则
  */
 const reClosingCodeFence = /^(`{3,}|~{3,})\s*$/;
@@ -54,7 +61,7 @@ const reHtmlBlockClose: (RegExp | null)[] = [
 /**
  * 当前行可能开始块级特殊结构的快速预判断正则
  */
-const reMaybeSpecial = /^[#`~*+\-_=<>0-9!]/;
+const reMaybeSpecial = /^[#`~*+\-_=<>0-9!|]/;
 
 // #endregion
 
@@ -168,8 +175,33 @@ export class BlockParser {
    */
   inlineParser: InlineParser;
 
-  constructor() {
-    this.inlineParser = new InlineParser();
+  /**
+   * 已注册的插件列表
+   */
+  plugins: MarkdownPlugin[] = [];
+
+  /**
+   * 插件提供的块级 handler（展开后的缓存）
+   */
+  #blockHandlers: BlockHandler[] = [];
+
+  /**
+   * 插件提供的行内 handler（展开后的缓存）
+   */
+  #inlineHandlers: InlineHandler[] = [];
+
+  constructor(plugins?: MarkdownPlugin[]) {
+    this.plugins = plugins || [];
+    this.#blockHandlers = collectPluginHandlers(this.plugins, p => p.blockHandlers);
+    this.#inlineHandlers = collectPluginHandlers(this.plugins, p => p.inlineHandlers);
+    this.inlineParser = new InlineParser(this.#inlineHandlers);
+
+    // 注册插件的容器类型
+    for (const handler of this.#blockHandlers) {
+      if (handler.isContainer) {
+        registerContainerType(handler.nodeType);
+      }
+    }
   }
 
   // #region 公共 API
@@ -211,6 +243,14 @@ export class BlockParser {
       }
       this.finalize(this.doc, len);
       this.processInlines(this.doc);
+
+      // 插件后处理
+      for (const plugin of this.plugins) {
+        if (plugin.postProcess) {
+          plugin.postProcess(this.doc);
+        }
+      }
+
       return this.doc;
     });
 
@@ -448,8 +488,21 @@ export class BlockParser {
           case "paragraph":
             return this.blank ? 1 : 0;
 
-          default:
+          case "table":
+            // 表格在空行或不含管道符的行处中断
+            if (this.blank) return 1;
+            if (!this.currentLine.slice(this.nextNonspace).includes("|")) return 1;
             return 0;
+
+          default: {
+            // 检查插件块 handler
+            for (const handler of this.#blockHandlers) {
+              if (handler.nodeType === container.type && handler.tryContinue) {
+                return handler.tryContinue(this, container);
+              }
+            }
+            return 0;
+          }
         }
       },
     );
@@ -559,47 +612,81 @@ export class BlockParser {
           // 先尝试从段落内容中解析链接引用定义
           let content = this.tip.stringContent;
           let hasRefDef = true;
-      while (content.charCodeAt(0) === 0x5b && hasRefDef) {
-        const result = this.parseLinkRefDef(content);
-        if (result !== null) {
-          content = result;
-        } else {
-          hasRefDef = false;
+          while (content.charCodeAt(0) === 0x5b && hasRefDef) {
+            const result = this.parseLinkRefDef(content);
+            if (result !== null) {
+              content = result;
+            } else {
+              hasRefDef = false;
+            }
+          }
+          // 如果所有内容都被引用定义消耗，则不是 setext 标题
+          if (content.trim() === "") {
+            this.tip.stringContent = content;
+            this.advanceOffset(this.currentLine.length - this.offset, false);
+            return 0;
+          }
+          this.closeUnmatchedBlocks();
+          const heading = new Node(
+            "heading",
+            this.tip.sourcepos
+              ? ([...this.tip.sourcepos] as [[number, number], [number, number]])
+              : undefined,
+          );
+          heading.level =
+            this.currentLine.charAt(this.nextNonspace) === "=" ? 1 : 2;
+          heading.stringContent = content
+            .replace(/\n$/, "")
+            .replace(/[ \t]+$/gm, "");
+          this.tip.insertBefore(heading);
+          this.tip.unlink();
+          this.tip = heading;
+          this.advanceOffset(this.currentLine.length - this.offset, false);
+          return 2;
         }
-      }
-      // 如果所有内容都被引用定义消耗，则不是 setext 标题
-      if (content.trim() === "") {
-        this.tip.stringContent = content;
-        this.advanceOffset(this.currentLine.length - this.offset, false);
-        return 0;
-      }
-      this.closeUnmatchedBlocks();
-      const heading = new Node(
-        "heading",
-        this.tip.sourcepos
-          ? ([...this.tip.sourcepos] as [[number, number], [number, number]])
-          : undefined,
-      );
-      heading.level =
-        this.currentLine.charAt(this.nextNonspace) === "=" ? 1 : 2;
-      heading.stringContent = content
-        .replace(/\n$/, "")
-        .replace(/[ \t]+$/gm, "");
-      this.tip.insertBefore(heading);
-      this.tip.unlink();
-      this.tip = heading;
-      this.advanceOffset(this.currentLine.length - this.offset, false);
-      return 2;
-    }
 
-    // 6. 主题分隔线
-    if (
-      !this.indented &&
-      reThematicBreak.test(this.currentLine.slice(this.nextNonspace))
-    ) {
-      this.closeUnmatchedBlocks();
-      this.addChild("thematic_break", this.nextNonspace);
-      this.advanceOffset(this.currentLine.length - this.offset, false);
+        // 5b. GFM 表格（段落 + 分隔行 → 表格，类似 Setext 标题的检测方式）
+        if (
+          !this.indented &&
+          this.tip.type === "paragraph" &&
+          this.allClosed
+        ) {
+          const delimLine = this.currentLine.slice(this.nextNonspace);
+          if (reTableDelimiterRow.test(delimLine)) {
+            const headerContent = this.tip.stringContent.replace(/\n$/, "");
+            // 表头只能是单行
+            if (!headerContent.includes("\n")) {
+              const alignments = this.parseTableAlignments(delimLine);
+              const headerCells = this.parseTableCells(headerContent);
+              if (alignments && headerCells.length === alignments.length) {
+                this.closeUnmatchedBlocks();
+                // 将段落替换为 table 节点
+                const table = new Node(
+                  "table" as NodeType,
+                  this.tip.sourcepos
+                    ? ([...this.tip.sourcepos] as [[number, number], [number, number]])
+                    : undefined,
+                );
+                table.tableAlignments = alignments;
+                table.stringContent = headerContent + "\n";
+                this.tip.insertBefore(table);
+                this.tip.unlink();
+                this.tip = table;
+                this.advanceOffset(this.currentLine.length - this.offset, false);
+                return 2;
+              }
+            }
+          }
+        }
+
+        // 6. 主题分隔线
+        if (
+          !this.indented &&
+          reThematicBreak.test(this.currentLine.slice(this.nextNonspace))
+        ) {
+          this.closeUnmatchedBlocks();
+          this.addChild("thematic_break", this.nextNonspace);
+          this.advanceOffset(this.currentLine.length - this.offset, false);
           return 2;
         }
 
@@ -621,6 +708,13 @@ export class BlockParser {
           return 2;
         }
 
+        // 9. 插件块 handler
+        for (const handler of this.#blockHandlers) {
+          if (handler.tryStart(this, container)) {
+            return handler.acceptsLines ? 2 : (handler.isContainer ? 1 : 2);
+          }
+        }
+
         return 0;
       },
     );
@@ -635,9 +729,16 @@ export class BlockParser {
     BlockParser.prototype.acceptsLines = overload(
       [String],
       function (this: BlockParser, type: string): boolean {
-        return (
-          type === "paragraph" || type === "code_block" || type === "html_block"
-        );
+        if (type === "paragraph" || type === "code_block" || type === "html_block" || type === "table") {
+          return true;
+        }
+        // 检查插件 acceptsLines
+        for (const handler of this.#blockHandlers) {
+          if (handler.nodeType === type && handler.acceptsLines) {
+            return true;
+          }
+        }
+        return false;
       },
     );
     return (BlockParser.prototype.acceptsLines as Function).apply(this, params);
@@ -819,8 +920,19 @@ export class BlockParser {
             return childType !== "item";
           case "list":
             return childType === "item";
-          default:
+          case "table":
+            return childType === "table_row";
+          case "table_row":
+            return childType === "table_cell";
+          default: {
+            // 检查插件 canContain handler
+            for (const handler of this.#blockHandlers) {
+              if (handler.nodeType === parentType && handler.canContain) {
+                return handler.canContain(childType);
+              }
+            }
             return false;
+          }
         }
       },
     );
@@ -900,8 +1012,19 @@ export class BlockParser {
           case "list":
             this.finalizeList(block);
             break;
-          default:
+          case "table":
+            this.finalizeTable(block);
             break;
+          default: {
+            // 检查插件 finalize handler
+            for (const handler of this.#blockHandlers) {
+              if (handler.nodeType === block.type && handler.finalize) {
+                handler.finalize(this, block);
+                break;
+              }
+            }
+            break;
+          }
         }
 
         this.tip = parent || this.doc;
@@ -998,6 +1121,74 @@ export class BlockParser {
   }
 
   /**
+   * 解析表格分隔行，提取列对齐方式。
+   */
+  public parseTableAlignments(delimLine: string): TableAlign[] | null {
+    const stripped = delimLine.trim().replace(/^\||\|$/g, "");
+    const cells = stripped.split("|");
+    if (cells.length === 0) return null;
+    const alignments: TableAlign[] = [];
+    for (const cell of cells) {
+      const trimmed = cell.trim();
+      if (!/^:?-+:?$/.test(trimmed)) return null;
+      const left = trimmed.startsWith(":");
+      const right = trimmed.endsWith(":");
+      if (left && right) alignments.push("center");
+      else if (right) alignments.push("right");
+      else if (left) alignments.push("left");
+      else alignments.push(null);
+    }
+    return alignments;
+  }
+
+  /**
+   * 解析表格行文本为单元格内容数组。
+   */
+  public parseTableCells(line: string): string[] {
+    let stripped = line.trim();
+    if (stripped.startsWith("|")) stripped = stripped.slice(1);
+    if (stripped.endsWith("|") && !stripped.endsWith("\\|")) stripped = stripped.slice(0, -1);
+    const cells: string[] = [];
+    let current = "";
+    for (let i = 0; i < stripped.length; i++) {
+      if (stripped[i] === "\\" && i + 1 < stripped.length && stripped[i + 1] === "|") {
+        current += "|";
+        i++;
+      } else if (stripped[i] === "|") {
+        cells.push(current.trim());
+        current = "";
+      } else {
+        current += stripped[i];
+      }
+    }
+    cells.push(current.trim());
+    return cells;
+  }
+
+  /**
+   * 终结表格节点：将积累的行内容解析为 table_row / table_cell 子树。
+   */
+  public finalizeTable(block: Node): void {
+    const lines = block.stringContent.split("\n").filter(l => l.length > 0);
+    block.stringContent = "";
+    const alignments = block.tableAlignments || [];
+
+    if (lines.length === 0) return;
+
+    // 所有行直接作为 table 的子节点
+    for (let r = 0; r < lines.length; r++) {
+      const row = new Node("table_row" as NodeType);
+      block.appendChild(row);
+      const cells = this.parseTableCells(lines[r]);
+      for (let i = 0; i < alignments.length; i++) {
+        const cell = new Node("table_cell" as NodeType);
+        cell.stringContent = cells[i] || "";
+        row.appendChild(cell);
+      }
+    }
+  }
+
+  /**
    * 检查给定块节点（含嵌套列表末端）是否以空行结尾。
    */
   public endsWithBlankLine(block: Node): boolean;
@@ -1032,128 +1223,128 @@ export class BlockParser {
     BlockParser.prototype.parseLinkRefDef = overload(
       [String],
       function (this: BlockParser, s: string): string | null {
-    let pos = 0;
-    if (s.charCodeAt(pos) !== 0x5b) return null;
-    pos++;
-
-    let nestLevel = 1;
-    let labelEnd = -1;
-
-    while (pos < s.length && nestLevel > 0) {
-      const ch = s.charCodeAt(pos);
-      if (ch === 0x5c && pos + 1 < s.length) {
-        pos += 2;
-        continue;
-      }
-      if (ch === 0x5b) return null;
-      if (ch === 0x5d) {
-        nestLevel--;
-        if (nestLevel === 0) labelEnd = pos;
-      }
-      pos++;
-    }
-
-    if (labelEnd === -1) return null;
-
-    const rawLabel = s.substring(1, labelEnd);
-    if (rawLabel.trim() === "" || rawLabel.length > 999) return null;
-
-    if (s.charCodeAt(pos) !== 0x3a) return null;
-    pos++;
-
-    while (
-      pos < s.length &&
-      (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-    ) {
-      pos++;
-    }
-    if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
-      pos++;
-      while (
-        pos < s.length &&
-        (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-      ) {
+        let pos = 0;
+        if (s.charCodeAt(pos) !== 0x5b) return null;
         pos++;
-      }
-    }
 
-    const destResult = this.parseLinkDestination(s, pos);
-    if (destResult === null) return null;
-    const dest = destResult.destination;
-    pos = destResult.pos;
+        let nestLevel = 1;
+        let labelEnd = -1;
 
-    const beforeTitle = pos;
-    let spacesBeforeTitle = 0;
-    let newlineBeforeTitle = false;
-    while (
-      pos < s.length &&
-      (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-    ) {
-      pos++;
-      spacesBeforeTitle++;
-    }
-    if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
-      pos++;
-      newlineBeforeTitle = true;
-      while (
-        pos < s.length &&
-        (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-      ) {
+        while (pos < s.length && nestLevel > 0) {
+          const ch = s.charCodeAt(pos);
+          if (ch === 0x5c && pos + 1 < s.length) {
+            pos += 2;
+            continue;
+          }
+          if (ch === 0x5b) return null;
+          if (ch === 0x5d) {
+            nestLevel--;
+            if (nestLevel === 0) labelEnd = pos;
+          }
+          pos++;
+        }
+
+        if (labelEnd === -1) return null;
+
+        const rawLabel = s.substring(1, labelEnd);
+        if (rawLabel.trim() === "" || rawLabel.length > 999) return null;
+
+        if (s.charCodeAt(pos) !== 0x3a) return null;
         pos++;
-      }
-    }
 
-    let title = "";
-    let hasTitle = false;
-    if (spacesBeforeTitle > 0 || newlineBeforeTitle) {
-      const titleResult = this.parseLinkTitle(s, pos);
-      if (titleResult !== null) {
-        title = titleResult.title;
-        pos = titleResult.pos;
-        hasTitle = true;
-      } else {
-        pos = beforeTitle + spacesBeforeTitle;
-      }
-    } else {
-      pos = beforeTitle;
-    }
+        while (
+          pos < s.length &&
+          (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+        ) {
+          pos++;
+        }
+        if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
+          pos++;
+          while (
+            pos < s.length &&
+            (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+          ) {
+            pos++;
+          }
+        }
 
-    while (
-      pos < s.length &&
-      (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-    ) {
-      pos++;
-    }
+        const destResult = this.parseLinkDestination(s, pos);
+        if (destResult === null) return null;
+        const dest = destResult.destination;
+        pos = destResult.pos;
 
-    let atEnd = pos >= s.length || s.charCodeAt(pos) === 0x0a;
+        const beforeTitle = pos;
+        let spacesBeforeTitle = 0;
+        let newlineBeforeTitle = false;
+        while (
+          pos < s.length &&
+          (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+        ) {
+          pos++;
+          spacesBeforeTitle++;
+        }
+        if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
+          pos++;
+          newlineBeforeTitle = true;
+          while (
+            pos < s.length &&
+            (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+          ) {
+            pos++;
+          }
+        }
 
-    if (!atEnd && hasTitle) {
-      hasTitle = false;
-      title = "";
-      pos = beforeTitle + spacesBeforeTitle;
-      while (
-        pos < s.length &&
-        (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
-      ) {
-        pos++;
-      }
-      atEnd = pos >= s.length || s.charCodeAt(pos) === 0x0a;
-    }
+        let title = "";
+        let hasTitle = false;
+        if (spacesBeforeTitle > 0 || newlineBeforeTitle) {
+          const titleResult = this.parseLinkTitle(s, pos);
+          if (titleResult !== null) {
+            title = titleResult.title;
+            pos = titleResult.pos;
+            hasTitle = true;
+          } else {
+            pos = beforeTitle + spacesBeforeTitle;
+          }
+        } else {
+          pos = beforeTitle;
+        }
 
-    if (!atEnd) return null;
+        while (
+          pos < s.length &&
+          (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+        ) {
+          pos++;
+        }
 
-    if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
-      pos++;
-    }
+        let atEnd = pos >= s.length || s.charCodeAt(pos) === 0x0a;
 
-    const label = normalizeReference("[" + rawLabel + "]");
-    if (label === "") return null;
+        if (!atEnd && hasTitle) {
+          hasTitle = false;
+          title = "";
+          pos = beforeTitle + spacesBeforeTitle;
+          while (
+            pos < s.length &&
+            (s.charCodeAt(pos) === 0x20 || s.charCodeAt(pos) === 0x09)
+          ) {
+            pos++;
+          }
+          atEnd = pos >= s.length || s.charCodeAt(pos) === 0x0a;
+        }
 
-    if (!(label in this.refmap)) {
-      this.refmap[label] = { destination: dest, title: title };
-    }
+        if (!atEnd) return null;
 
-    return s.substring(pos);
+        if (pos < s.length && s.charCodeAt(pos) === 0x0a) {
+          pos++;
+        }
+
+        const label = normalizeReference("[" + rawLabel + "]");
+        if (label === "") return null;
+
+        if (!(label in this.refmap)) {
+          this.refmap[label] = { destination: dest, title: title };
+        }
+
+        return s.substring(pos);
       },
     );
     return (BlockParser.prototype.parseLinkRefDef as Function).apply(this, params);
@@ -1172,68 +1363,68 @@ export class BlockParser {
       function (this: BlockParser, s: string, pos: number): { destination: string; pos: number } | null {
         if (pos >= s.length) return null;
 
-    if (s.charCodeAt(pos) === 0x3c) {
-      pos++;
-      let dest = "";
-      while (pos < s.length) {
-        const ch = s.charCodeAt(pos);
-        if (ch === 0x0a || ch === 0x0d) return null;
-        if (ch === 0x3e)
-          return { destination: unescapeString(dest), pos: pos + 1 };
-        if (
-          ch === 0x5c &&
-          pos + 1 < s.length &&
-          s.charCodeAt(pos + 1) !== 0x0a
-        ) {
-          dest += s.charAt(pos + 1);
-          pos += 2;
-          continue;
+        if (s.charCodeAt(pos) === 0x3c) {
+          pos++;
+          let dest = "";
+          while (pos < s.length) {
+            const ch = s.charCodeAt(pos);
+            if (ch === 0x0a || ch === 0x0d) return null;
+            if (ch === 0x3e)
+              return { destination: unescapeString(dest), pos: pos + 1 };
+            if (
+              ch === 0x5c &&
+              pos + 1 < s.length &&
+              s.charCodeAt(pos + 1) !== 0x0a
+            ) {
+              dest += s.charAt(pos + 1);
+              pos += 2;
+              continue;
+            }
+            if (ch === 0x3c) return null;
+            dest += s.charAt(pos);
+            pos++;
+          }
+          return null;
         }
-        if (ch === 0x3c) return null;
-        dest += s.charAt(pos);
-        pos++;
-      }
-      return null;
-    }
 
-    let parenDepth = 0;
-    let dest = "";
-    const startPos = pos;
+        let parenDepth = 0;
+        let dest = "";
+        const startPos = pos;
 
-    while (pos < s.length) {
-      const ch = s.charCodeAt(pos);
-      if (isSpaceOrTab(ch) || ch === 0x0a || ch === 0x0d) break;
-      if (ch < 0x20 || ch === 0x7f) break;
-      if (
-        ch === 0x5c &&
-        pos + 1 < s.length &&
-        isAsciiPunctuation(s.charCodeAt(pos + 1))
-      ) {
-        dest += s.charAt(pos + 1);
-        pos += 2;
-        continue;
-      }
-      if (ch === 0x28) {
-        parenDepth++;
-        if (parenDepth > 32) return null;
-        dest += "(";
-        pos++;
-        continue;
-      }
-      if (ch === 0x29) {
-        if (parenDepth === 0) break;
-        parenDepth--;
-        dest += ")";
-        pos++;
-        continue;
-      }
-      dest += s.charAt(pos);
-      pos++;
-    }
+        while (pos < s.length) {
+          const ch = s.charCodeAt(pos);
+          if (isSpaceOrTab(ch) || ch === 0x0a || ch === 0x0d) break;
+          if (ch < 0x20 || ch === 0x7f) break;
+          if (
+            ch === 0x5c &&
+            pos + 1 < s.length &&
+            isAsciiPunctuation(s.charCodeAt(pos + 1))
+          ) {
+            dest += s.charAt(pos + 1);
+            pos += 2;
+            continue;
+          }
+          if (ch === 0x28) {
+            parenDepth++;
+            if (parenDepth > 32) return null;
+            dest += "(";
+            pos++;
+            continue;
+          }
+          if (ch === 0x29) {
+            if (parenDepth === 0) break;
+            parenDepth--;
+            dest += ")";
+            pos++;
+            continue;
+          }
+          dest += s.charAt(pos);
+          pos++;
+        }
 
-    if (parenDepth !== 0) return null;
-    if (pos === startPos) return { destination: "", pos };
-    return { destination: unescapeString(dest), pos };
+        if (parenDepth !== 0) return null;
+        if (pos === startPos) return { destination: "", pos };
+        return { destination: unescapeString(dest), pos };
       },
     );
     return (BlockParser.prototype.parseLinkDestination as Function).apply(this, params);
@@ -1252,34 +1443,34 @@ export class BlockParser {
       function (this: BlockParser, s: string, pos: number): { title: string; pos: number } | null {
         if (pos >= s.length) return null;
 
-    const opener = s.charCodeAt(pos);
-    let closer: number;
-    if (opener === 0x22) closer = 0x22;
-    else if (opener === 0x27) closer = 0x27;
-    else if (opener === 0x28) closer = 0x29;
-    else return null;
+        const opener = s.charCodeAt(pos);
+        let closer: number;
+        if (opener === 0x22) closer = 0x22;
+        else if (opener === 0x27) closer = 0x27;
+        else if (opener === 0x28) closer = 0x29;
+        else return null;
 
-    pos++;
-    let title = "";
+        pos++;
+        let title = "";
 
-    while (pos < s.length) {
-      const ch = s.charCodeAt(pos);
-      if (ch === closer) return { title: unescapeString(title), pos: pos + 1 };
-      if (
-        ch === 0x5c &&
-        pos + 1 < s.length &&
-        isAsciiPunctuation(s.charCodeAt(pos + 1))
-      ) {
-        title += s.charAt(pos + 1);
-        pos += 2;
-        continue;
-      }
-      if (opener === 0x28 && ch === 0x28) return null;
-      title += s.charAt(pos);
-      pos++;
-    }
+        while (pos < s.length) {
+          const ch = s.charCodeAt(pos);
+          if (ch === closer) return { title: unescapeString(title), pos: pos + 1 };
+          if (
+            ch === 0x5c &&
+            pos + 1 < s.length &&
+            isAsciiPunctuation(s.charCodeAt(pos + 1))
+          ) {
+            title += s.charAt(pos + 1);
+            pos += 2;
+            continue;
+          }
+          if (opener === 0x28 && ch === 0x28) return null;
+          title += s.charAt(pos);
+          pos++;
+        }
 
-    return null;
+        return null;
       },
     );
     return (BlockParser.prototype.parseLinkTitle as Function).apply(this, params);
@@ -1301,7 +1492,7 @@ export class BlockParser {
         let event: ReturnType<typeof walker.next>;
         while ((event = walker.next())) {
           if (!event.entering) continue;
-          if (event.node.type === "paragraph" || event.node.type === "heading") {
+          if (event.node.type === "paragraph" || event.node.type === "heading" || event.node.type === "table_cell") {
             this.inlineParser.parse(event.node, this.refmap);
           }
         }
